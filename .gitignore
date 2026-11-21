@@ -2,3 +2,4 @@
 weights/
 results/
 data/
+src/__pycache__/
