@@ -2,4 +2,7 @@
 weights/
 results/
 data/
-src/__pycache__/
+__pycache__/
+*.pyc
+runs/
+*.pt

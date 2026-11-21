@@ -4,8 +4,10 @@ Annotate the print block on ALIGNED carton images.
 Every image is first levelled by the carton aligner, so a plain rectangle
 fits the print block even when the carton was tilted on the conveyor.
 
-    python annotate_aligned.py            annotate images that have no label yet
-    python annotate_aligned.py --review   step through every image again
+Run from the src folder:
+
+    python -m preprocessing.annotate_aligned            annotate images that have no label yet
+    python -m preprocessing.annotate_aligned --review   step through every image again
 
 Keys
     SPACE / ENTER   accept the box shown (print is present)
@@ -16,8 +18,8 @@ Keys
     B               go back one image
     Q / ESC         save and quit
 
-The suggested box is a rough classical guess. Check every one: the detector
-can only be as accurate as these boxes.
+The suggested box is a rough classical guess. Check every one: the crop
+region and the evaluation are both built from these boxes.
 """
 from __future__ import annotations
 
@@ -27,9 +29,9 @@ import tkinter as tk
 import cv2
 from PIL import Image, ImageTk
 
-from label_locator import LocatorConfig, suggest_print_box
-from locator_dataset import (
-    SPLITS, HAS_PRINT, MISSING_PRINT, WRONG_VIEW, UprightView,
+from preprocessing.align import AlignConfig, suggest_print_box
+from preprocessing.annotations import (
+    SPLIT_KEYS, HAS_PRINT, MISSING_PRINT, WRONG_VIEW, UprightView,
     load_manifest, load_annotations, save_annotations,
 )
 
@@ -39,7 +41,7 @@ MAX_W, MAX_H = 1000, 720
 class Annotator:
     def __init__(self, items, annotations, review: bool):
         self.items, self.ann, self.review = items, annotations, review
-        self.cfg = LocatorConfig()
+        self.cfg = AlignConfig()
         self.idx = 0
         self.view = None
         self.box = None
@@ -178,7 +180,7 @@ class Annotator:
 
 def main() -> None:
     manifest = load_manifest()
-    items = [(item, key) for key, _ in SPLITS for item in manifest[key]]
+    items = [(item, key) for key in SPLIT_KEYS for item in manifest[key]]
     annotations = load_annotations()
     print(f"{len(items)} images, {sum(1 for i, _ in items if i['path'] in annotations)} already annotated.")
     Annotator(items, annotations, review="--review" in sys.argv)
