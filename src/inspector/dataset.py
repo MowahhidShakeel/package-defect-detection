@@ -60,7 +60,8 @@ def _pack(img: np.ndarray, mask: np.ndarray, label: int):
 
 
 class TrainSet(Dataset):
-    def __init__(self, seed: int, repeats: int = 10):
+    def __init__(self, seed: int, repeats: int = 10, redraw_ok: bool = False):
+        self.redraw_ok = redraw_ok        # also serve good cartons whose print was redrawn in place
         self.crops, _ = load_crops("train_ok")
         self.gen = DefectGenerator(seed=seed)
         self.rng = np.random.default_rng(seed + 1000)
@@ -82,7 +83,13 @@ class TrainSet(Dataset):
             sample = self.gen.make_defect(crop, layout)
             if sample is not None:
                 return _pack(*augment(sample.image, sample.mask, self.rng), 1)
-        img = self.gen.retouch_clean(crop, layout) if self.rng.random() < P_RETOUCH else crop
+        roll = self.rng.random()
+        if self.redraw_ok and roll < 1 / 3:
+            img = self.gen.redraw_clean(crop, layout)
+        elif roll < (2 / 3 if self.redraw_ok else P_RETOUCH):
+            img = self.gen.retouch_clean(crop, layout)
+        else:
+            img = crop
         return _pack(*augment(img, blank, self.rng), 0)
 
 
@@ -105,6 +112,24 @@ def build_validation_set(seed: int = 12345):
             if sample is not None:
                 items.append((sample.image, sample.mask, 1, "+".join(sample.types)))
     return items
+
+
+def good_validation_variants(seed: int = 54321, per_crop: int = 10) -> List[np.ndarray]:
+    """Good validation crops under the small shifts, zooms and brightness
+    changes a good carton may show, half of them retouched. Used to find how
+    high a good carton can score, which sets the OK / NOT OK threshold."""
+    crops, _ = load_crops("val_ok")
+    gen = DefectGenerator(seed=seed)
+    rng = np.random.default_rng(seed)
+    out = []
+    for crop in crops:
+        layout = gen.analyse(crop)
+        blank = np.zeros(crop.shape[:2], np.uint8)
+        out.append(crop)
+        for k in range(per_crop - 1):
+            img = gen.retouch_clean(crop, layout) if k % 2 else crop
+            out.append(augment(img, blank, rng)[0])
+    return out
 
 
 class ListSet(Dataset):

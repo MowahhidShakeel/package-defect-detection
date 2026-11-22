@@ -439,6 +439,20 @@ class DefectGenerator:
             return None
         return DefectSample(out, mask, [n for n, _ in plan], [s for _, s in plan])
 
+    def redraw_clean(self, crop_bgr: np.ndarray, layout: Optional[Layout] = None) -> np.ndarray:
+        """For GOOD images: lift the whole print off the carton and draw it back
+        in the same place (moved by under half a pixel), exactly the way moved
+        print is drawn in the shift, skew and cut-off defects. The result is
+        still a good carton. It checks, and when used in training prevents, a
+        model learning 'redrawn print means defect' instead of the defect."""
+        layout = layout or self.analyse(crop_bgr)
+        if not layout.valid:
+            return crop_bgr.copy()
+        dx, dy = self.rng.uniform(-0.5, 0.5, size=2)
+        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        out = self._render(crop_bgr, layout, np.ones(layout.ink.shape, np.float32), self._moved_ink(layout, M))
+        return np.clip(out + 0.5, 0, 255).astype(np.uint8)
+
     def retouch_clean(self, crop_bgr: np.ndarray, layout: Optional[Layout] = None) -> np.ndarray:
         """For GOOD images during training: rebuild a patch of plain carton with
         the same fill used when print is removed, and leave the print alone.

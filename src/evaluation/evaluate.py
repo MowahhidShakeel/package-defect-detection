@@ -5,18 +5,24 @@ Run from the src folder:
 
     python -m evaluation.evaluate                           ResNet-34, seeds 0 1 2
     python -m evaluation.evaluate --encoder mobilevit_xxs --seeds 0 1 2
+    python -m evaluation.evaluate --tag redraw              a variant trained with --tag redraw
+    python -m evaluation.evaluate --threshold midpoint      the earlier threshold method
 
 For each seed:
     1. The OK / NOT OK threshold is set on the VALIDATION images only.
+       "good" (default): just above the highest score any good validation
+       carton gets, counting small shifts and brightness changes.
+       "midpoint": halfway between good and synthetic-defect validation scores.
+       Both are computed and printed; the chosen one decides the verdicts.
     2. Good test cartons            -> false reject rate
     3. Real NOT OK test cartons     -> recall, split by fault kind
     4. Synthetic test set           -> recall per defect type, and how well the map finds the defect
-    5. Retouched good test cartons  -> shortcut check: must score like untouched ones
+    5. Retouched and redrawn good test cartons -> shortcut checks: must score like untouched ones
     6. Time per carton on this machine
 
 Real test images are never used to choose anything.
 
-Outputs in results/evaluation/<encoder>/
+Outputs in results/evaluation/<encoder>[_<tag>]/
     summary.csv                    one row per seed, plus mean and spread
     per_image_seed<n>.csv          every test image with its score and verdict
     maps_seed<n>/*.jpg             crop next to its defect map: every mistake, plus examples
@@ -36,15 +42,16 @@ from sklearn.metrics import roc_auc_score
 
 from config import DATA_DIR, DEVICE, RESULTS_DIR
 from generator.defects import DefectGenerator
-from inspector.dataset import build_validation_set, load_crops
+from inspector.dataset import build_validation_set, good_validation_variants, load_crops
 from inspector.model import carton_score, count_parameters, load_checkpoint, to_tensor
-from inspector.train import checkpoint_path
+from inspector.train import checkpoint_path, run_name
 
 SYNTHETIC_TEST_DIR = DATA_DIR / "synthetic_test"
 CROPS_LOG = RESULTS_DIR / "preprocessing" / "crops_log.csv"
 NAME_RE = re.compile(r"^(train_ok|val_ok|test_ok|test_not_ok)_\d{4}_(.+)\.png$")
 WARMUP = 10
 EXAMPLES_PER_KIND = 6
+GOOD_MARGIN = 0.05           # "good" threshold = highest good validation score + this
 
 
 def clopper_pearson(k: int, n: int, alpha: float = 0.05):
@@ -119,9 +126,9 @@ def load_synthetic_test():
     return rows, images, masks
 
 
-def evaluate_seed(encoder: str, seed: int, out_dir, data) -> dict:
+def evaluate_seed(encoder: str, seed: int, out_dir, data, tag: str = "", method: str = "good") -> dict:
     device = DEVICE
-    model, info = load_checkpoint(checkpoint_path(encoder, seed), device)
+    model, info = load_checkpoint(checkpoint_path(encoder, seed, tag), device)
     maps_dir = out_dir / f"maps_seed{seed}"
     maps_dir.mkdir(parents=True, exist_ok=True)
     for old in maps_dir.glob("*.jpg"):
@@ -131,7 +138,10 @@ def evaluate_seed(encoder: str, seed: int, out_dir, data) -> dict:
     val = data["val"]
     val_scores, _ = run(model, [v[0] for v in val], device)
     val_labels = np.array([v[2] for v in val])
-    thr = pick_threshold(val_scores[val_labels == 0], val_scores[val_labels == 1])
+    thr_mid = pick_threshold(val_scores[val_labels == 0], val_scores[val_labels == 1])
+    good_scores, _ = run(model, data["val_good_variants"], device)
+    thr_good = float(good_scores.max()) + GOOD_MARGIN
+    thr, thr_other, other = (thr_good, thr_mid, "midpoint") if method == "good" else (thr_mid, thr_good, "good")
 
     # 2-3. Real test cartons
     ok_scores, ok_maps = run(model, data["ok_imgs"], device)
@@ -149,9 +159,11 @@ def evaluate_seed(encoder: str, seed: int, out_dir, data) -> dict:
         px_score.append(prob.ravel()[idx])
     pixel_auroc = roc_auc_score(np.concatenate(px_true), np.concatenate(px_score))
 
-    # 5. Shortcut check
+    # 5. Shortcut checks
     ret_scores, _ = run(model, data["retouched"], device)
     ret_rej = ret_scores >= thr
+    red_scores, red_maps = run(model, data["redrawn"], device)
+    red_rej = red_scores >= thr
 
     # 6. Speed
     ms_median, ms_p95 = time_per_carton(model, data["ok_imgs"][0], device)
@@ -185,6 +197,9 @@ def evaluate_seed(encoder: str, seed: int, out_dir, data) -> dict:
             shown[kind] = shown.get(kind, 0) + 1
             save_map(maps_dir / f"caught_{kind}_{shown[kind]}.jpg", data["bad_imgs"][i], bad_maps[i],
                      f"real {kind} caught, score {bad_scores[i]:.3f}")
+    for i in np.flatnonzero(red_rej & ~ok_rej)[:10]:
+        save_map(maps_dir / f"REDRAWN_REJECT_{data['ok_names'][i][:-4]}.jpg", data["redrawn"][i], red_maps[i],
+                 f"good carton, print redrawn in place: score {red_scores[i]:.3f} (untouched {ok_scores[i]:.3f})")
     for i in np.flatnonzero(~syn_hit)[:30]:
         save_map(maps_dir / f"MISS_synthetic_{i:04d}_{data['syn_rows'][i]['types'].replace('|', '+')}.jpg",
                  data["syn_imgs"][i], syn_maps[i], f"synthetic {data['syn_rows'][i]['types']} missed, score {syn_scores[i]:.3f}")
@@ -199,9 +214,9 @@ def evaluate_seed(encoder: str, seed: int, out_dir, data) -> dict:
     bad_frame_caught = sum(all(h for n, h in zip(data["bad_names"], bad_hit) if frame_of(n) == fr) for fr in bad_frames)
     ok_frame_clean = sum(not any(r for n, r in zip(data["ok_names"], ok_rej) if frame_of(n) == fr) for fr in ok_frames)
 
-    print(f"\n--- {encoder} seed {seed} (epoch {info.get('epoch')}, {count_parameters(model) / 1e6:.1f}M parameters) ---")
-    print(f"Threshold {thr:.4f}, set on {int((val_labels == 0).sum())} good and {int((val_labels == 1).sum())} "
-          f"synthetic-defect validation images")
+    print(f"\n--- {run_name(encoder, tag)} seed {seed} (epoch {info.get('epoch')}, {count_parameters(model) / 1e6:.1f}M parameters) ---")
+    print(f"Threshold {thr:.4f} ('{method}' method). Highest good validation score {good_scores.max():.4f} over "
+          f"{len(good_scores)} good variants; lowest synthetic-defect validation score {val_scores[val_labels == 1].min():.4f}")
     print(f"Good test cartons rejected : {int(ok_rej.sum())}/{n_ok} = {100 * ok_rej.mean():.2f}% "
           f"(95% CI {100 * fr_lo:.1f} to {100 * fr_hi:.1f}%) | frames with no reject: {ok_frame_clean}/{len(ok_frames)}")
     print(f"Real NOT OK cartons caught : {n_bad - miss}/{n_bad} = {100 * bad_hit.mean():.2f}% "
@@ -221,12 +236,20 @@ def evaluate_seed(encoder: str, seed: int, out_dir, data) -> dict:
             mild = hits[sev < 0.34].mean() if (sev < 0.34).any() else float("nan")
             type_recall[t] = float(hits.mean())
             print(f"      {t:<20} {int(hits.sum()):3d}/{int(sel.sum()):3d} | mild (severity under 0.34): {100 * mild:.0f}%")
-    print(f"Shortcut check             : retouched good cartons rejected {int(ret_rej.sum())}/{len(ret_rej)} "
+    print(f"Shortcut check, repainted carton : retouched good cartons rejected {int(ret_rej.sum())}/{len(ret_rej)} "
           f"(untouched: {int(ok_rej.sum())}/{n_ok}); mean score {ret_scores.mean():.4f} vs {ok_scores.mean():.4f}")
+    print(f"Shortcut check, redrawn print    : redrawn good cartons rejected {int(red_rej.sum())}/{len(red_rej)} "
+          f"(untouched: {int(ok_rej.sum())}/{n_ok}); mean score {red_scores.mean():.4f} vs {ok_scores.mean():.4f}; "
+          f"median {np.median(red_scores):.4f} vs {np.median(ok_scores):.4f}")
+    o_rej, o_hit = ok_scores >= thr_other, bad_scores >= thr_other
+    kinds_other = ", ".join(f"{k} {int(o_hit[np.array([x == k for x in data['bad_kinds']])].sum())}/"
+                            f"{int(sum(x == k for x in data['bad_kinds']))}" for k in sorted(set(data["bad_kinds"])))
+    print(f"With the '{other}' threshold ({thr_other:.4f}) instead: good rejected {int(o_rej.sum())}/{n_ok}, "
+          f"real NOT OK caught {int(o_hit.sum())}/{n_bad} ({kinds_other})")
     print(f"Time per carton ({device})   : median {ms_median:.1f} ms, 95th percentile {ms_p95:.1f} ms. Not a Jetson Nano figure.")
 
     summary = {
-        "seed": seed, "epoch": info.get("epoch"), "threshold": round(thr, 5),
+        "seed": seed, "epoch": info.get("epoch"), "threshold_method": method, "threshold": round(thr, 5),
         "false_reject_pct": round(100 * float(ok_rej.mean()), 3),
         "real_recall_pct": round(100 * float(bad_hit.mean()), 3),
         "real_auroc": round(float(roc_auc_score([0] * n_ok + [1] * n_bad, np.concatenate([ok_scores, bad_scores]))), 5),
@@ -234,6 +257,12 @@ def evaluate_seed(encoder: str, seed: int, out_dir, data) -> dict:
         "synthetic_auroc": round(float(roc_auc_score([0] * n_ok + [1] * len(syn_scores), np.concatenate([ok_scores, syn_scores]))), 5),
         "pixel_auroc": round(float(pixel_auroc), 5),
         "retouched_reject_pct": round(100 * float(ret_rej.mean()), 3),
+        "redrawn_reject_pct": round(100 * float(red_rej.mean()), 3),
+        "redrawn_mean_score": round(float(red_scores.mean()), 5),
+        "untouched_mean_score": round(float(ok_scores.mean()), 5),
+        f"alt_{other}_threshold": round(thr_other, 5),
+        f"alt_{other}_false_reject_pct": round(100 * float(o_rej.mean()), 3),
+        f"alt_{other}_real_recall_pct": round(100 * float(o_hit.mean()), 3),
         "ms_median": round(ms_median, 2), "parameters_m": round(count_parameters(model) / 1e6, 2),
     }
     for kind in sorted(set(data["bad_kinds"])):
@@ -248,9 +277,12 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Evaluate the defect-map inspector.")
     p.add_argument("--encoder", default="resnet34")
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
+    p.add_argument("--tag", default="", help="evaluate the variant trained with this --tag")
+    p.add_argument("--threshold", choices=["good", "midpoint"], default="good")
     a = p.parse_args()
 
-    out_dir = RESULTS_DIR / "evaluation" / a.encoder
+    name = run_name(a.encoder, a.tag)
+    out_dir = RESULTS_DIR / "evaluation" / name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ok_imgs, ok_names = load_crops("test_ok")
@@ -262,11 +294,13 @@ def main() -> None:
     gen = DefectGenerator(seed=777)
     data = {
         "val": build_validation_set(),
+        "val_good_variants": good_validation_variants(),
         "ok_imgs": ok_imgs, "ok_names": ok_names,
         "bad_imgs": bad_imgs, "bad_names": bad_names,
         "bad_kinds": [kinds.get(n, "unlabelled") for n in bad_names],
         "syn_rows": syn_rows, "syn_imgs": syn_imgs, "syn_masks": syn_masks,
         "retouched": [gen.retouch_clean(im) for im in ok_imgs],
+        "redrawn": [gen.redraw_clean(im) for im in ok_imgs],
     }
     n_ok_frames = len({frame_of(n) for n in ok_names})
     n_bad_frames = len({frame_of(n) for n in bad_names})
@@ -277,15 +311,15 @@ def main() -> None:
 
     summaries = []
     for seed in a.seeds:
-        if not checkpoint_path(a.encoder, seed).exists():
-            print(f"\nNo checkpoint for seed {seed}: {checkpoint_path(a.encoder, seed)}. Skipping.")
+        if not checkpoint_path(a.encoder, seed, a.tag).exists():
+            print(f"\nNo checkpoint for seed {seed}: {checkpoint_path(a.encoder, seed, a.tag)}. Skipping.")
             continue
-        summaries.append(evaluate_seed(a.encoder, seed, out_dir, data))
+        summaries.append(evaluate_seed(a.encoder, seed, out_dir, data, a.tag, a.threshold))
     if not summaries:
         return
 
     keys = list(summaries[0].keys())
-    numeric = [k for k in keys if k not in ("seed", "epoch")]
+    numeric = [k for k in keys if k not in ("seed", "epoch", "threshold_method")]
     with open(out_dir / "summary.csv", "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=keys)
         writer.writeheader()
@@ -295,10 +329,10 @@ def main() -> None:
             writer.writerow({"seed": "std", **{k: round(float(np.std([s[k] for s in summaries])), 4) for k in numeric}})
 
     if len(summaries) > 1:
-        print(f"\n=== {a.encoder}: mean and spread over {len(summaries)} seeds ===")
+        print(f"\n=== {name}: mean and spread over {len(summaries)} seeds ('{a.threshold}' threshold) ===")
         for k, label in [("false_reject_pct", "Good cartons rejected (%)"), ("real_recall_pct", "Real NOT OK caught (%)"),
                          ("real_auroc", "Real AUROC"), ("synthetic_recall_pct", "Synthetic defects caught (%)"),
-                         ("pixel_auroc", "Pixel AUROC"), ("retouched_reject_pct", "Retouched good rejected (%)"),
+                         ("pixel_auroc", "Pixel AUROC"), ("retouched_reject_pct", "Retouched good rejected (%)"), ("redrawn_reject_pct", "Redrawn good rejected (%)"),
                          ("ms_median", "Time per carton (ms)")]:
             v = [s[k] for s in summaries]
             print(f"  {label:<30} {np.mean(v):8.3f} +/- {np.std(v):.3f}")
