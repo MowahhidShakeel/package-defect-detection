@@ -6,7 +6,7 @@ Run from the src folder:
     python -m inspector.train                               ResNet-34, seeds 0 1 2
     python -m inspector.train --encoder mobilevit_xxs       another encoder, same everything else
     python -m inspector.train --seeds 0 --epochs 5          a quick trial run
-    python -m inspector.train --redraw-ok --tag redraw      a variant, saved beside the baseline
+    python -m inspector.train --encoder resnet18 --tag trial   a variant, saved beside the others
 
 Each seed is a full, independent training run. Comparing models on several
 seeds shows whether a difference between them is real or luck.
@@ -68,7 +68,7 @@ def validate(model, loader, device):
 
 
 def train_one(encoder: str, seed: int, epochs: int, batch: int, repeats: int, pretrained: bool,
-              redraw_ok: bool = False, tag: str = "") -> None:
+              redraw_ok: bool = True, tag: str = "") -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -138,12 +138,13 @@ def main() -> None:
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--repeats", type=int, default=10, help="times each training crop is drawn per epoch")
     p.add_argument("--no-pretrained", action="store_true", help="start from random weights (for testing only)")
-    p.add_argument("--redraw-ok", action="store_true",
-                   help="also train on good cartons whose print was redrawn in place (see DefectGenerator.redraw_clean)")
+    p.add_argument("--no-redraw-ok", action="store_true",
+                   help="do NOT train on good cartons whose print was redrawn in place. Without them the model "
+                        "learns 'redrawn print means defect' (see DefectGenerator.redraw_clean); for comparison only")
     p.add_argument("--tag", default="", help="suffix for the saved files, so a variant does not overwrite the baseline")
     a = p.parse_args()
     for seed in a.seeds:
-        train_one(a.encoder, seed, a.epochs, a.batch, a.repeats, not a.no_pretrained, a.redraw_ok, a.tag)
+        train_one(a.encoder, seed, a.epochs, a.batch, a.repeats, not a.no_pretrained, not a.no_redraw_ok, a.tag)
 
 
 if __name__ == "__main__":

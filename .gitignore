@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 runs/
 *.pt
+deploy_bundle/
+*.onnx
+*.engine

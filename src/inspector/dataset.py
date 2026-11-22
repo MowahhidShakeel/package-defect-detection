@@ -4,9 +4,10 @@ Training and validation data for the inspector.
 Training images are made fresh on every load from the good training crops:
 
     half  : a random synthetic defect, with its pixel mask
-    half  : a good carton, of which half are 'retouched' (a patch of plain
-            carton rebuilt, print untouched) so that rebuilt carton is not a
-            clue to the answer
+    half  : a good carton. A third are untouched, a third 'retouched' (a
+            patch of plain carton rebuilt) and a third 'redrawn' (the print
+            lifted and drawn back in place), so that neither rebuilt carton
+            nor redrawn print is a clue to the answer
 
 Then a small random shift, zoom and brightness change is applied.
 
@@ -60,7 +61,7 @@ def _pack(img: np.ndarray, mask: np.ndarray, label: int):
 
 
 class TrainSet(Dataset):
-    def __init__(self, seed: int, repeats: int = 10, redraw_ok: bool = False):
+    def __init__(self, seed: int, repeats: int = 10, redraw_ok: bool = True):
         self.redraw_ok = redraw_ok        # also serve good cartons whose print was redrawn in place
         self.crops, _ = load_crops("train_ok")
         self.gen = DefectGenerator(seed=seed)
