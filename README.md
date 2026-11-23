@@ -34,9 +34,15 @@ Two kinds of good image are mixed into training so the network cannot cheat: car
 
 Real defective cartons are used for testing only, never for training or for choosing a threshold.
 
-## Current results
+## Data
 
-ResNet-34 encoder, three training runs with different seeds, mean ± spread.
+One production day (15 March 2023): 5,207 good cartons captured between 11:15 and 13:43, and 25 real NOT OK cartons (unsealed, missing print, print off the edge, wrong angle, glare, wrong side). Images are 512 x 480.
+
+Good cartons are split by the minute they were captured in: 35 minutes for training, 6 for validation and 4 for testing. The validation and test cartons therefore carry print times the model has never seen, which is what happens on the line every day. All NOT OK cartons are test-only.
+
+## Results on the first, small dataset
+
+These figures come from the earlier dataset of 41 unique camera frames and are kept for reference until the models are retrained on the full day. ResNet-34 encoder, three training runs with different seeds, mean ± spread.
 
 | Measure | Result |
 |---|---|
@@ -53,9 +59,8 @@ Read these with the limits below in mind.
 
 ## Known limitations
 
-- **The dataset is small.** 346 images come from 41 unique camera frames. The real test evidence is 8 defective frames and 6 good ones, so the percentages above are less certain than they look.
-- **All training cartons are from five minutes of production**, with the same price, batch and date. The network treats unseen content, such as a new print time, as a defect. Good cartons from every batch in production must be in the training set.
-- **The real defects are gross ones**: blank flap, wrong side, print cut off. Performance on fine defects (missing dots, partial characters, smudges, fading) is measured on synthetic images only.
+- **One production day, one batch.** Every carton has the same price, batch number and dates; only the print time changes. A model trained on this will probably reject another batch until good cartons from it are added to training.
+- **Only 25 real defective cartons**, and they are gross faults. Performance on fine defects (missing dots, partial characters, smudges, fading) is measured on synthetic images only.
 - **Print cut off at the carton edge is caught unreliably.** The remaining characters are well formed and the lost ones are off the carton, so the only clue is the gap where the print should start.
 - **Upside-down cartons are not corrected.** Colour cannot tell 0° from 180°.
 - **Not yet run on a Jetson Nano.** The deployment code is tested with ONNX Runtime on a PC. The TensorRT path is written but untested.
@@ -101,15 +106,19 @@ All commands run from `src/`.
 
 | Step | Command | What it does |
 |---|---|---|
-| 1 | `python -m preprocessing.split_dataset` | Splits images into train, validation and test by camera frame |
-| 2 | `python -m preprocessing.annotate_aligned` | Opens the tool for marking the print block on each image |
-| 3 | `python -m preprocessing.build_crops` | Measures the label region and writes all label crops |
-| 4 | `python -m generator.make` | Writes defect review sheets and the synthetic test set |
-| 5 | `python -m inspector.train` | Trains the inspector, three seeds |
-| 6 | `python -m evaluation.evaluate` | Evaluates and writes results and defect-map pictures |
+| 1 | `python -m preprocessing.split_dataset` | Splits images into train, validation and test by capture minute |
+| 2 | `python -m preprocessing.build_crops` | Writes all label crops and checks each one automatically |
+| 3 | `python -m generator.make` | Writes defect review sheets and the synthetic test set |
+| 4 | `python -m inspector.train` | Trains the inspector, three seeds |
+| 5 | `python -m evaluation.evaluate` | Evaluates and writes results and defect-map pictures |
+| 6 | `python -m evaluation.audit_train` | Shows the highest-scoring good training cartons, to find mislabelled ones |
 | 7 | `python -m deploy.export` | Packages the best model for the Jetson Nano |
 
-Steps 1 to 3 are only repeated when images are added.
+Steps 1 and 2 are only repeated when images are added.
+
+The label region is stored in `weights/crop_region.json`. It only has to be measured again if the camera is moved: annotate some good cartons with `python -m preprocessing.annotate_aligned`, then run `python -m preprocessing.build_crops --remeasure`.
+
+Training time does not depend on the size of the dataset. Each epoch draws a fixed number of random training cartons (`--samples-per-epoch`, default 1,500) and makes a fresh defect for half of them.
 
 Other encoders use the same commands with `--encoder`, for example `python -m inspector.train --encoder resnet18` and `python -m evaluation.evaluate --encoder resnet18`. Any `timm` model that returns multi-scale feature maps works.
 

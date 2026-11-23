@@ -3,94 +3,80 @@ Split the Tapal images into train / validation / test.
 
     python -m preprocessing.split_dataset        (run from the src folder)
 
-Good cartons are grouped by camera frame, so copies of one frame never land
-in two splits. Every real NOT OK carton goes to the test set only.
+File names look like 111540_230315_1_0000008890.bmp:
+capture time (hhmmss), date (yymmdd), line number, camera frame number.
+
+Good cartons are split by the MINUTE they were captured in. All cartons of
+one minute go to the same split, so the validation and test sets contain
+print times the model never saw in training. That is the situation on the
+line every day, and it is what the false reject rate should be measured on.
+
+Every real NOT OK carton goes to the test set only.
 Writes data/tapal_filtered/tapal_session_split.json.
 """
 from __future__ import annotations
 
-import glob
 import json
+import random
 import re
 from pathlib import Path
 
-from config import TAPAL_OK_RAW_DIR, TAPAL_NOT_OK_RAW_DIR, RAW_FILTERED_DIR
+from config import RAW_FILTERED_DIR, SEED, TAPAL_NOT_OK_RAW_DIR, TAPAL_OK_RAW_DIR
+
+NAME_RE = re.compile(r"^(?:.*_)?(\d{6})_(\d{6})_(\d+)_(\d+)$")
+IMAGE_TYPES = (".bmp", ".png", ".jpg", ".jpeg")
+TRAIN_SHARE, VAL_SHARE = 0.70, 0.15
 
 
-def parse_tapal_filename(filepath: Path):
-    """
-    Parses filenames like: augmented_0_111605_230315_1_0000008974.jpg
-    Returns (copy_index, session_id, unique_frame_id)
-    """
-    stem = filepath.stem
-    m = re.match(r"^augmented_(\d+)_(\d+_\d+_\d+)_(\d+)$", stem, re.IGNORECASE)
-    if m:
-        copy_idx = int(m.group(1))
-        session_id = m.group(2)
-        frame_num = m.group(3)
-        unique_frame_id = f"{session_id}_{frame_num}"
-        return copy_idx, session_id, unique_frame_id
-
-    digits = re.findall(r"\d+", stem)
-    session_id = digits[1] if len(digits) >= 2 else "session_default"
-    return 0, session_id, stem
+def describe(path: Path) -> dict:
+    m = NAME_RE.match(path.stem)
+    if not m:
+        return {"minute": "unknown", "frame": path.stem}
+    return {"minute": f"{m.group(2)}_{m.group(1)[:4]}", "frame": m.group(4)}
 
 
-def filter_and_split_sessions():
-    ok_files = sorted([
-        Path(p) for ext in ("*.bmp", "*.jpg", "*.jpeg", "*.png")
-        for p in glob.glob(str(TAPAL_OK_RAW_DIR / ext))
-    ])
-    not_ok_files = sorted([
-        Path(p) for ext in ("*.bmp", "*.jpg", "*.jpeg", "*.png")
-        for p in glob.glob(str(TAPAL_NOT_OK_RAW_DIR / ext))
-    ])
+def list_images(folder: Path) -> list:
+    if not folder.exists():
+        raise FileNotFoundError(f"Folder not found: {folder}. Check the dataset paths in config.py.")
+    return sorted(p for p in folder.iterdir() if p.suffix.lower() in IMAGE_TYPES)
 
-    # Sort OK files by physical camera frame ID so copies of the same frame stay in the same split
-    ok_real = sorted(ok_files, key=lambda p: parse_tapal_filename(p)[2])
-    not_ok_real = sorted(not_ok_files, key=lambda p: parse_tapal_filename(p)[2])
 
-    print(f"[Tapal Dataset] OK: {len(ok_real)} images | Not_OK: {len(not_ok_real)} images "
-          f"(Total: {len(ok_real) + len(not_ok_real)})")
+def split_dataset() -> dict:
+    ok, not_ok = list_images(TAPAL_OK_RAW_DIR), list_images(TAPAL_NOT_OK_RAW_DIR)
+    by_minute = {}
+    for p in ok:
+        by_minute.setdefault(describe(p)["minute"], []).append(p)
 
-    # Group by unique frame ID first, then partition into 10 contiguous session blocks
-    # so identical frames never leak across train/val/test
-    unique_frames = []
-    frame_to_paths = {}
-    for p in ok_real:
-        _, _, fid = parse_tapal_filename(p)
-        if fid not in frame_to_paths:
-            unique_frames.append(fid)
-            frame_to_paths[fid] = []
-        frame_to_paths[fid].append(p)
-
-    n_unique = len(unique_frames)
-    n_train = max(1, int(0.70 * n_unique))
-    n_val = max(1, int(0.15 * n_unique))
-
-    train_fids = set(unique_frames[:n_train])
-    val_fids = set(unique_frames[n_train:n_train + n_val])
-
+    # Hand out whole minutes at random until each split has its share of the images
+    minutes = sorted(by_minute)
+    random.Random(SEED).shuffle(minutes)
+    targets = {"train_ok": TRAIN_SHARE * len(ok), "val_ok": VAL_SHARE * len(ok)}
     manifest = {"train_ok": [], "val_ok": [], "test_ok": [], "test_not_ok": []}
-    for fid in unique_frames:
-        target = "train_ok" if fid in train_fids else ("val_ok" if fid in val_fids else "test_ok")
-        for p in frame_to_paths[fid]:
-            _, sid, _ = parse_tapal_filename(p)
-            manifest[target].append({"path": str(p), "session": fid, "label": "OK"})
+    minutes_in = {k: [] for k in manifest}
+    for minute in minutes:
+        split = next((k for k in ("train_ok", "val_ok") if len(manifest[k]) < targets[k]), "test_ok")
+        minutes_in[split].append(minute)
+        for p in by_minute[minute]:
+            manifest[split].append({"path": str(p), "session": p.stem, "label": "OK", "minute": minute})
+    for p in not_ok:
+        manifest["test_not_ok"].append({"path": str(p), "session": p.stem, "label": "Not_OK",
+                                        "minute": describe(p)["minute"]})
 
-    for p in not_ok_real:
-        _, sid, fid = parse_tapal_filename(p)
-        manifest["test_not_ok"].append({"path": str(p), "session": fid, "label": "Not_OK"})
+    RAW_FILTERED_DIR.mkdir(parents=True, exist_ok=True)
+    out = RAW_FILTERED_DIR / "tapal_session_split.json"
+    out.write_text(json.dumps(manifest, indent=2))
 
-    manifest_path = RAW_FILTERED_DIR / "tapal_session_split.json"
-    with open(manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2)
-
-    print(f"[Session Split Saved] Train OK: {len(manifest['train_ok'])}, "
-          f"Val OK: {len(manifest['val_ok'])}, Test OK: {len(manifest['test_ok'])}, "
-          f"Test Real Not_OK: {len(manifest['test_not_ok'])}")
+    print(f"{len(ok)} good and {len(not_ok)} NOT OK images | {len(minutes)} capture minutes of good cartons")
+    for k in ("train_ok", "val_ok", "test_ok"):
+        print(f"  {k:>9}: {len(manifest[k]):5d} images from {len(minutes_in[k]):2d} minutes")
+    print(f"  test_not_ok: {len(manifest['test_not_ok'])} images")
+    overlap = {describe(Path(i['path']))['frame'] for i in manifest['test_not_ok']} & \
+              {describe(p)['frame'] for p in ok}
+    if overlap:
+        print(f"WARNING: {len(overlap)} frame numbers appear in both the OK and NG folders: {sorted(overlap)[:5]}")
+    print(f"Saved {out}")
     return manifest
 
 
 if __name__ == "__main__":
-    filter_and_split_sessions()
+    split_dataset()

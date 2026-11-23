@@ -36,6 +36,7 @@ PREVIEW_SEVERITIES = [0.1, 0.3, 0.5, 0.7, 0.95]
 PREVIEW_CARTONS = 4
 EXPORT_PER_TYPE = 2          # per good test crop: this many of every single defect type ...
 EXPORT_MIXED = 4             # ... plus this many random draws (which include double defects)
+EXPORT_SOURCE_CROPS = 80     # good test crops used, spread evenly over the test set
 
 
 def _load(split: str):
@@ -105,7 +106,10 @@ def export_test_set() -> None:
             old.unlink()
     gen = DefectGenerator(seed=SEED + 1)
     rows, skipped = [], 0
-    for path in _load("test_ok"):
+    sources = _load("test_ok")
+    if len(sources) > EXPORT_SOURCE_CROPS:
+        sources = [sources[i] for i in np.linspace(0, len(sources) - 1, EXPORT_SOURCE_CROPS).astype(int)]
+    for path in sources:
         crop = cv2.imread(str(path))
         layout = gen.analyse(crop)
         if not layout.valid:

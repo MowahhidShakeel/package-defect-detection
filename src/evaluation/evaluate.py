@@ -51,6 +51,9 @@ CROPS_LOG = RESULTS_DIR / "preprocessing" / "crops_log.csv"
 NAME_RE = re.compile(r"^(train_ok|val_ok|test_ok|test_not_ok)_\d{4}_(.+)\.png$")
 WARMUP = 10
 EXAMPLES_PER_KIND = 6
+LIST_NOT_OK_UP_TO = 60       # with this many real NOT OK images or fewer, list and picture every one
+MAX_MISTAKE_PICTURES = 60
+SHORTCUT_CHECK_CROPS = 200   # good test crops used for the retouched and redrawn checks
 GOOD_MARGIN = 0.05           # "good" threshold = highest good validation score + this
 
 
@@ -63,9 +66,15 @@ def clopper_pearson(k: int, n: int, alpha: float = 0.05):
 
 
 def frame_of(name: str) -> str:
-    """Camera frame a crop came from. Copies of one frame are not independent evidence."""
+    """The raw image a crop came from (its file name without extension)."""
     m = NAME_RE.match(name)
     return m.group(2) if m else name
+
+
+def minute_of(name: str) -> str:
+    """Capture minute (hhmm) of a crop, from its raw file name hhmmss_yymmdd_line_frame."""
+    m = re.search(r"(\d{6})_\d{6}_\d+_\d+$", frame_of(name))
+    return m.group(1)[:4] if m else "?"
 
 
 @torch.no_grad()
@@ -160,6 +169,8 @@ def evaluate_seed(encoder: str, seed: int, out_dir, data, tag: str = "", method:
     pixel_auroc = roc_auc_score(np.concatenate(px_true), np.concatenate(px_score))
 
     # 5. Shortcut checks
+    sub = data["shortcut_idx"]
+    sub_scores, sub_rej = ok_scores[sub], ok_rej[sub]
     ret_scores, _ = run(model, data["retouched"], device)
     ret_rej = ret_scores >= thr
     red_scores, red_maps = run(model, data["redrawn"], device)
@@ -185,21 +196,25 @@ def evaluate_seed(encoder: str, seed: int, out_dir, data, tag: str = "", method:
         writer.writerows(rows)
 
     # ------------------------------------------------------------- pictures
-    for i in np.flatnonzero(ok_rej):
+    for i in np.flatnonzero(ok_rej)[:MAX_MISTAKE_PICTURES]:
         save_map(maps_dir / f"FALSE_REJECT_{data['ok_names'][i][:-4]}.jpg", data["ok_imgs"][i], ok_maps[i],
                  f"good carton rejected, score {ok_scores[i]:.3f} (threshold {thr:.3f})")
     for i in np.flatnonzero(~bad_hit):
         save_map(maps_dir / f"MISS_{data['bad_kinds'][i]}_{data['bad_names'][i][:-4]}.jpg", data["bad_imgs"][i],
                  bad_maps[i], f"real {data['bad_kinds'][i]} missed, score {bad_scores[i]:.3f} (threshold {thr:.3f})")
     shown = {}
+    show_all = len(bad_scores) <= LIST_NOT_OK_UP_TO          # few enough to keep a picture of every one
     for i, kind in enumerate(data["bad_kinds"]):
-        if bad_hit[i] and shown.get(kind, 0) < EXAMPLES_PER_KIND:
+        if bad_hit[i] and show_all:
+            save_map(maps_dir / f"caught_{data['bad_names'][i][:-4]}.jpg", data["bad_imgs"][i], bad_maps[i],
+                     f"real NOT OK caught, score {bad_scores[i]:.3f} (threshold {thr:.3f})")
+        elif bad_hit[i] and shown.get(kind, 0) < EXAMPLES_PER_KIND:
             shown[kind] = shown.get(kind, 0) + 1
             save_map(maps_dir / f"caught_{kind}_{shown[kind]}.jpg", data["bad_imgs"][i], bad_maps[i],
                      f"real {kind} caught, score {bad_scores[i]:.3f}")
-    for i in np.flatnonzero(red_rej & ~ok_rej)[:10]:
-        save_map(maps_dir / f"REDRAWN_REJECT_{data['ok_names'][i][:-4]}.jpg", data["redrawn"][i], red_maps[i],
-                 f"good carton, print redrawn in place: score {red_scores[i]:.3f} (untouched {ok_scores[i]:.3f})")
+    for i in np.flatnonzero(red_rej & ~sub_rej)[:10]:
+        save_map(maps_dir / f"REDRAWN_REJECT_{data['ok_names'][sub[i]][:-4]}.jpg", data["redrawn"][i], red_maps[i],
+                 f"good carton, print redrawn in place: score {red_scores[i]:.3f} (untouched {sub_scores[i]:.3f})")
     for i in np.flatnonzero(~syn_hit)[:30]:
         save_map(maps_dir / f"MISS_synthetic_{i:04d}_{data['syn_rows'][i]['types'].replace('|', '+')}.jpg",
                  data["syn_imgs"][i], syn_maps[i], f"synthetic {data['syn_rows'][i]['types']} missed, score {syn_scores[i]:.3f}")
@@ -209,21 +224,24 @@ def evaluate_seed(encoder: str, seed: int, out_dir, data, tag: str = "", method:
     fr_lo, fr_hi = clopper_pearson(int(ok_rej.sum()), n_ok)
     miss = int((~bad_hit).sum())
     ms_lo, ms_hi = clopper_pearson(miss, n_bad)
-    ok_frames = sorted({frame_of(n) for n in data["ok_names"]})
-    bad_frames = sorted({frame_of(n) for n in data["bad_names"]})
-    bad_frame_caught = sum(all(h for n, h in zip(data["bad_names"], bad_hit) if frame_of(n) == fr) for fr in bad_frames)
-    ok_frame_clean = sum(not any(r for n, r in zip(data["ok_names"], ok_rej) if frame_of(n) == fr) for fr in ok_frames)
+    ok_minutes = np.array([minute_of(n) for n in data["ok_names"]])
 
     print(f"\n--- {run_name(encoder, tag)} seed {seed} (epoch {info.get('epoch')}, {count_parameters(model) / 1e6:.1f}M parameters) ---")
     print(f"Threshold {thr:.4f} ('{method}' method). Highest good validation score {good_scores.max():.4f} over "
           f"{len(good_scores)} good variants; lowest synthetic-defect validation score {val_scores[val_labels == 1].min():.4f}")
     print(f"Good test cartons rejected : {int(ok_rej.sum())}/{n_ok} = {100 * ok_rej.mean():.2f}% "
-          f"(95% CI {100 * fr_lo:.1f} to {100 * fr_hi:.1f}%) | frames with no reject: {ok_frame_clean}/{len(ok_frames)}")
+          f"(95% CI {100 * fr_lo:.1f} to {100 * fr_hi:.1f}%)")
+    print("      by capture minute (none of these minutes were in training): " + ", ".join(
+        f"{m[:2]}:{m[2:]} {int(ok_rej[ok_minutes == m].sum())}/{int((ok_minutes == m).sum())}" for m in sorted(set(ok_minutes))))
     print(f"Real NOT OK cartons caught : {n_bad - miss}/{n_bad} = {100 * bad_hit.mean():.2f}% "
-          f"(miss rate 95% CI {100 * ms_lo:.1f} to {100 * ms_hi:.1f}%) | frames fully caught: {bad_frame_caught}/{len(bad_frames)}")
-    for kind in sorted(set(data["bad_kinds"])):
-        sel = np.array([k == kind for k in data["bad_kinds"]])
-        print(f"      {kind:<16} {int(bad_hit[sel].sum())}/{int(sel.sum())}")
+          f"(miss rate 95% CI {100 * ms_lo:.1f} to {100 * ms_hi:.1f}%)")
+    if len(set(data["bad_kinds"])) > 1:
+        for kind in sorted(set(data["bad_kinds"])):
+            sel = np.array([k == kind for k in data["bad_kinds"]])
+            print(f"      {kind:<16} {int(bad_hit[sel].sum())}/{int(sel.sum())}")
+    if n_bad <= LIST_NOT_OK_UP_TO:
+        for name, sc, hit in zip(data["bad_names"], bad_scores, bad_hit):
+            print(f"      {'caught' if hit else 'MISSED'}  score {sc:.3f}  {frame_of(name)}")
     print(f"Real AUROC (good vs NOT OK): {roc_auc_score([0] * n_ok + [1] * n_bad, np.concatenate([ok_scores, bad_scores])):.4f}")
     print(f"Synthetic defects caught   : {int(syn_hit.sum())}/{len(syn_hit)} = {100 * syn_hit.mean():.2f}% | "
           f"map quality (pixel AUROC) {pixel_auroc:.4f}")
@@ -237,10 +255,10 @@ def evaluate_seed(encoder: str, seed: int, out_dir, data, tag: str = "", method:
             type_recall[t] = float(hits.mean())
             print(f"      {t:<20} {int(hits.sum()):3d}/{int(sel.sum()):3d} | mild (severity under 0.34): {100 * mild:.0f}%")
     print(f"Shortcut check, repainted carton : retouched good cartons rejected {int(ret_rej.sum())}/{len(ret_rej)} "
-          f"(untouched: {int(ok_rej.sum())}/{n_ok}); mean score {ret_scores.mean():.4f} vs {ok_scores.mean():.4f}")
+          f"(the same cartons untouched: {int(sub_rej.sum())}/{len(sub)}); mean score {ret_scores.mean():.4f} vs {sub_scores.mean():.4f}")
     print(f"Shortcut check, redrawn print    : redrawn good cartons rejected {int(red_rej.sum())}/{len(red_rej)} "
-          f"(untouched: {int(ok_rej.sum())}/{n_ok}); mean score {red_scores.mean():.4f} vs {ok_scores.mean():.4f}; "
-          f"median {np.median(red_scores):.4f} vs {np.median(ok_scores):.4f}")
+          f"(the same cartons untouched: {int(sub_rej.sum())}/{len(sub)}); mean score {red_scores.mean():.4f} vs {sub_scores.mean():.4f}; "
+          f"median {np.median(red_scores):.4f} vs {np.median(sub_scores):.4f}")
     o_rej, o_hit = ok_scores >= thr_other, bad_scores >= thr_other
     kinds_other = ", ".join(f"{k} {int(o_hit[np.array([x == k for x in data['bad_kinds']])].sum())}/"
                             f"{int(sum(x == k for x in data['bad_kinds']))}" for k in sorted(set(data["bad_kinds"])))
@@ -259,7 +277,7 @@ def evaluate_seed(encoder: str, seed: int, out_dir, data, tag: str = "", method:
         "retouched_reject_pct": round(100 * float(ret_rej.mean()), 3),
         "redrawn_reject_pct": round(100 * float(red_rej.mean()), 3),
         "redrawn_mean_score": round(float(red_scores.mean()), 5),
-        "untouched_mean_score": round(float(ok_scores.mean()), 5),
+        "untouched_mean_score": round(float(sub_scores.mean()), 5),
         f"alt_{other}_threshold": round(thr_other, 5),
         f"alt_{other}_false_reject_pct": round(100 * float(o_rej.mean()), 3),
         f"alt_{other}_real_recall_pct": round(100 * float(o_hit.mean()), 3),
@@ -299,15 +317,15 @@ def main() -> None:
         "bad_imgs": bad_imgs, "bad_names": bad_names,
         "bad_kinds": [kinds.get(n, "unlabelled") for n in bad_names],
         "syn_rows": syn_rows, "syn_imgs": syn_imgs, "syn_masks": syn_masks,
-        "retouched": [gen.retouch_clean(im) for im in ok_imgs],
-        "redrawn": [gen.redraw_clean(im) for im in ok_imgs],
     }
-    n_ok_frames = len({frame_of(n) for n in ok_names})
-    n_bad_frames = len({frame_of(n) for n in bad_names})
-    print(f"Test data: {len(ok_imgs)} good crops from {n_ok_frames} camera frames | {len(bad_imgs)} real NOT OK crops "
-          f"from {n_bad_frames} frames | {len(syn_imgs)} synthetic defects")
-    print("Copies of one frame are near-identical, so the confidence intervals below are narrower than the "
-          "evidence really supports. Read the per-frame counts alongside them.")
+    sub = np.linspace(0, len(ok_imgs) - 1, min(SHORTCUT_CHECK_CROPS, len(ok_imgs))).astype(int)
+    data["shortcut_idx"] = sub
+    data["retouched"] = [gen.retouch_clean(ok_imgs[i]) for i in sub]
+    data["redrawn"] = [gen.redraw_clean(ok_imgs[i]) for i in sub]
+    n_minutes = len({minute_of(n) for n in ok_names})
+    print(f"Test data: {len(ok_imgs)} good crops from {n_minutes} capture minutes | {len(bad_imgs)} real NOT OK crops | "
+          f"{len(syn_imgs)} synthetic defects")
+    print("The good test cartons come from minutes that were held out of training, so their print times are new to the model.")
 
     summaries = []
     for seed in a.seeds:

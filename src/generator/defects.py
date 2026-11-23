@@ -109,7 +109,8 @@ class DefectGenerator:
         for lo, hi in cfg.hsv_ranges:
             red |= cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
         red = cv2.morphologyEx(red, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11)))
-        inner = cv2.erode(red, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)))
+        # Stay 10 px clear of the carton's left and right edges: the shadow there is dark like ink
+        inner = cv2.erode(red, cv2.getStructuringElement(cv2.MORPH_RECT, (21, 7)))
 
         # --- Dark print on the carton
         chan = crop_bgr[:, :, cfg.ink_channel]
@@ -123,6 +124,13 @@ class DefectGenerator:
         n, labels, stats, _ = cv2.connectedComponentsWithStats(joined)
         for i in range(1, n):
             if stats[i, cv2.CC_STAT_WIDTH] > 0.5 * w and stats[i, cv2.CC_STAT_HEIGHT] < 0.07 * h:
+                dark[labels == i] = 0
+
+        # ... and tall thin bands (shading at the carton's side edges)
+        joined = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 15)))
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(joined)
+        for i in range(1, n):
+            if stats[i, cv2.CC_STAT_HEIGHT] > 0.45 * h and stats[i, cv2.CC_STAT_WIDTH] < 0.06 * w:
                 dark[labels == i] = 0
 
         # The print is the cluster holding the most ink
@@ -172,11 +180,17 @@ class DefectGenerator:
         # around it. Fine grain is then copied in from plain carton nearby.
         clean = (cv2.erode(inner, np.ones((5, 5), np.uint8)) > 0) & (zone == 0) & (not_plain == 0)
         weight = clean.astype(np.float32)
+        # (worked out at quarter size: lighting is smooth, and this is 5x faster)
+        q = 4
+        small = (max(1, w // q), max(1, h // q))
+        num_s = cv2.resize(img * weight[..., None], small, interpolation=cv2.INTER_AREA)
+        den_s = cv2.resize(weight, small, interpolation=cv2.INTER_AREA)
         estimates = []
         for sigma in (9.0, 30.0):          # the wide pass covers spots far from any plain carton
-            num = cv2.GaussianBlur(img * weight[..., None], (0, 0), sigma)
-            den = cv2.GaussianBlur(weight, (0, 0), sigma)[..., None]
-            estimates.append((num / np.maximum(den, 1e-4), den))
+            num = cv2.GaussianBlur(num_s, (0, 0), sigma / q)
+            den = cv2.GaussianBlur(den_s, (0, 0), sigma / q)[..., None]
+            est = cv2.resize(num / np.maximum(den, 1e-4), (w, h), interpolation=cv2.INTER_LINEAR)
+            estimates.append((est, cv2.resize(den, (w, h), interpolation=cv2.INTER_LINEAR)[..., None]))
         trust = np.clip(estimates[0][1] / 0.35, 0.0, 1.0)      # how much plain carton the narrow pass saw
         lighting = trust * estimates[0][0] + (1.0 - trust) * estimates[1][0]
         texture = img - cv2.GaussianBlur(img, (0, 0), 2.0)      # fine grain only

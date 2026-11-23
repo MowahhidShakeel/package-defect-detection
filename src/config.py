@@ -7,15 +7,10 @@ import torch
 # ==============================================================================
 REPO_ROOT = Path(r"C:\Mowahhid\Projects_Repo\package-defect-detection")
 
-TAPAL_OK_RAW_DIR = Path(
-    r"C:\Mowahhid\LUMS\MS-Thesis\Project_Repo\Mowahhid_Project\FinalVersion"
-    r"\datasets\Pattern_detection\ok-20251130T193428Z-1-001-20251222T074643Z-1-001"
-    r"\ok-20251130T193428Z-1-001\ok"
-)
-TAPAL_NOT_OK_RAW_DIR = Path(
-    r"C:\Mowahhid\LUMS\MS-Thesis\Project_Repo\Mowahhid_Project\FinalVersion"
-    r"\datasets\Pattern_detection\not_ok-20251219T070643Z-1-001\not_ok"
-)
+# Raw camera images (not in the repository)
+DATASET_DIR = REPO_ROOT / "dataset" / "Tapal Images_17-03-2023" / "10g Boxes_15-03-2023"
+TAPAL_OK_RAW_DIR = DATASET_DIR / "OK"
+TAPAL_NOT_OK_RAW_DIR = DATASET_DIR / "NG"
 
 DATA_DIR = REPO_ROOT / "data"
 RAW_FILTERED_DIR = DATA_DIR / "tapal_filtered"

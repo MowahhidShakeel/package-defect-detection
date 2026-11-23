@@ -67,7 +67,7 @@ def validate(model, loader, device):
     return total / max(n, 1), roc_auc_score(labels, scores)
 
 
-def train_one(encoder: str, seed: int, epochs: int, batch: int, repeats: int, pretrained: bool,
+def train_one(encoder: str, seed: int, epochs: int, batch: int, samples_per_epoch: int, pretrained: bool,
               redraw_ok: bool = True, tag: str = "") -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -75,7 +75,7 @@ def train_one(encoder: str, seed: int, epochs: int, batch: int, repeats: int, pr
     device = DEVICE
     use_amp = device == "cuda"
 
-    train_set = TrainSet(seed=seed, repeats=repeats, redraw_ok=redraw_ok)
+    train_set = TrainSet(seed=seed, samples_per_epoch=samples_per_epoch, redraw_ok=redraw_ok)
     # num_workers=0: the generator keeps its own random state, and it is fast enough in-process
     train_loader = DataLoader(train_set, batch_size=batch, shuffle=True, num_workers=0, drop_last=True)
     val_loader = DataLoader(ListSet(build_validation_set()), batch_size=batch, shuffle=False, num_workers=0)
@@ -91,7 +91,7 @@ def train_one(encoder: str, seed: int, epochs: int, batch: int, repeats: int, pr
 
     name = run_name(encoder, tag)
     print(f"\n=== {name} | seed {seed} | {count_parameters(model) / 1e6:.1f}M parameters | {device} | "
-          f"{len(train_set.crops)} training crops, {len(train_set)} samples per epoch, {len(val_loader.dataset)} validation images ===")
+          f"{len(train_set.paths)} training crops, {len(train_set)} samples per epoch, {len(val_loader.dataset)} validation images ===")
     INSPECTOR_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
     log_path = INSPECTOR_RESULTS_DIR / f"train_{name}_seed{seed}.csv"
@@ -136,7 +136,8 @@ def main() -> None:
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--batch", type=int, default=16)
-    p.add_argument("--repeats", type=int, default=10, help="times each training crop is drawn per epoch")
+    p.add_argument("--samples-per-epoch", type=int, default=1500,
+                   help="training samples per epoch, each a fresh random draw from all training crops")
     p.add_argument("--no-pretrained", action="store_true", help="start from random weights (for testing only)")
     p.add_argument("--no-redraw-ok", action="store_true",
                    help="do NOT train on good cartons whose print was redrawn in place. Without them the model "
@@ -144,7 +145,7 @@ def main() -> None:
     p.add_argument("--tag", default="", help="suffix for the saved files, so a variant does not overwrite the baseline")
     a = p.parse_args()
     for seed in a.seeds:
-        train_one(a.encoder, seed, a.epochs, a.batch, a.repeats, not a.no_pretrained, not a.no_redraw_ok, a.tag)
+        train_one(a.encoder, seed, a.epochs, a.batch, a.samples_per_epoch, not a.no_pretrained, not a.no_redraw_ok, a.tag)
 
 
 if __name__ == "__main__":

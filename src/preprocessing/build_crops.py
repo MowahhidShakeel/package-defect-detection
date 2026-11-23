@@ -4,19 +4,25 @@ the label crops for every image.
 
 Run from the src folder:
 
-    python -m preprocessing.build_crops                  measure, then write all crops
+    python -m preprocessing.build_crops                  write all crops with the saved region
+    python -m preprocessing.build_crops --remeasure      measure the region again from annotations first
     python -m preprocessing.build_crops --measure-only   print the measurements and stop
 
-The crop region is set from the annotated GOOD TRAINING cartons only, so the
-validation and test images play no part in choosing it. After that, no
-annotation is used: every image goes through `extract_label_crop`, the same
+The crop region is measured once from annotated GOOD TRAINING cartons and
+saved. As long as the camera has not moved it is reused, so new images need
+no annotation: every image goes through `extract_label_crop`, the same
 function the live system will call.
+
+Each crop is then checked automatically: is there a print, and does it lie
+clear of the crop's edges? Good cartons that fail are listed in the log and
+shown on a contact sheet, for a look by eye.
 
 Outputs
     weights/crop_region.json                     the fixed region (needed at inference)
     data/crops_aligned/<split>/*.png             colour crops for the generator and inspector
     results/preprocessing/crops_log.csv          one row per image
     results/preprocessing/sheet_<group>.jpg      contact sheets to check by eye
+    results/preprocessing/sheet_flagged_good.jpg good cartons whose print was not found clear of the edges
 """
 from __future__ import annotations
 
@@ -26,7 +32,9 @@ import time
 
 import cv2
 import numpy as np
+from tqdm import tqdm
 
+from generator.defects import DefectGenerator
 from preprocessing.align import AlignConfig, CropRegion, extract_label_crop, to_face_units, bounding_box, apply_affine
 from preprocessing.annotations import (
     CROP_REGION_PATH, CROPS_DIR, PREPROCESSING_RESULTS_DIR, SPLIT_KEYS, HAS_PRINT,
@@ -35,6 +43,7 @@ from preprocessing.annotations import (
 
 MARGIN = 0.06          # extra room around the print on every side, as a share of the region width
 SHEET_MAX = 24         # crops per contact sheet
+EDGE_CLEARANCE = 4     # pixels the print must keep from the crop's edges
 
 
 def _annotated_prints(split_key: str, manifest: dict, annotations: dict, cfg: AlignConfig):
@@ -130,14 +139,15 @@ def _contact_sheet(crops: list, path) -> None:
 
 def write_crops(region: CropRegion, cfg: AlignConfig, manifest: dict, annotations: dict) -> None:
     PREPROCESSING_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    rows, sheets, times = [], {}, []
+    rows, sheets, times, flagged = [], {}, [], []
+    checker = DefectGenerator(seed=0)
     for split_key in SPLIT_KEYS:
         out_dir = CROPS_DIR / split_key
         out_dir.mkdir(parents=True, exist_ok=True)
         for old in out_dir.glob("*.png"):
             old.unlink()
 
-        for idx, item in enumerate(manifest[split_key]):
+        for idx, item in enumerate(tqdm(manifest[split_key], desc=f"Cropping {split_key}")):
             img = cv2.imread(item["path"])
             if img is None:
                 continue
@@ -154,10 +164,25 @@ def write_crops(region: CropRegion, cfg: AlignConfig, manifest: dict, annotation
             if entry.get("status") == HAS_PRINT and entry.get("quad") and res.face_found:
                 inside = round(_inside_share(bounding_box(apply_affine(np.array(entry["quad"]), res.M)), res.box), 4)
             status = entry.get("status", "not_annotated")
+
+            # Automatic check of the crop itself (no annotation needed)
+            layout = checker.analyse(res.crop)
+            if not layout.valid:
+                print_check = "no_print_found"
+            else:
+                bx1, by1, bx2, by2 = layout.block
+                ch, cw = res.crop.shape[:2]
+                clear = min(bx1, by1, cw - bx2, ch - by2)
+                print_check = "ok" if clear >= EDGE_CLEARANCE else "near_edge"
+                if len(layout.lines) != checker.cfg.expected_lines:
+                    print_check += f"_{len(layout.lines)}_lines"
+            if item["label"] == "OK" and print_check != "ok":
+                flagged.append(res.crop)
+
             rows.append({"split": split_key, "crop": name, "path": item["path"], "label": item["label"],
                          "annotated_status": status, "face_found": res.face_found,
                          "carton_angle": round(res.carton_angle, 2), "print_inside_crop": inside,
-                         "ms": round(times[-1], 2)})
+                         "print_check": print_check, "ms": round(times[-1], 2)})
             group = split_key if split_key != "test_not_ok" else f"test_not_ok_{status}"
             sheets.setdefault(group, []).append(res.crop)
 
@@ -165,8 +190,13 @@ def write_crops(region: CropRegion, cfg: AlignConfig, manifest: dict, annotation
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+    for old in PREPROCESSING_RESULTS_DIR.glob("sheet_*.jpg"):
+        old.unlink()
     for group, crops in sheets.items():
-        _contact_sheet(crops, PREPROCESSING_RESULTS_DIR / f"sheet_{group}.jpg")
+        # spread the sheet over the whole split instead of showing its first minutes only
+        picks = [crops[i] for i in np.linspace(0, len(crops) - 1, min(SHEET_MAX, len(crops))).astype(int)]
+        _contact_sheet(picks, PREPROCESSING_RESULTS_DIR / f"sheet_{group}.jpg")
+    _contact_sheet(flagged, PREPROCESSING_RESULTS_DIR / "sheet_flagged_good.jpg")
 
     # ---------------------------------------------------------------- report
     print(f"\n=== Crops written: {len(rows)} ===")
@@ -174,13 +204,17 @@ def write_crops(region: CropRegion, cfg: AlignConfig, manifest: dict, annotation
         sub = [r for r in rows if r["split"] == split_key]
         no_face = sum(not r["face_found"] for r in sub)
         ins = [r["print_inside_crop"] for r in sub if r["print_inside_crop"] != ""]
-        line = f"{split_key:>12}: {len(sub)} crops | carton face not found: {no_face}"
+        odd = sum(r["print_check"] != "ok" for r in sub)
+        line = f"{split_key:>12}: {len(sub)} crops | carton face not found: {no_face} | print check not ok: {odd}"
         if ins:
             whole = sum(v >= 0.98 for v in ins)
             line += f" | print fully inside the crop: {whole}/{len(ins)} (worst case {100 * min(ins):.0f}% inside)"
         print(line)
-    print("\nFor good cartons the print should be fully inside every crop. For NOT OK cartons a print that is")
-    print("partly outside is expected: that is the misplaced or cut-off print the inspector has to flag.")
+    print("\n'Print check not ok' means no print was found, it touches the crop's edge, or it does not have three")
+    print("lines. For NOT OK cartons that is expected. For good cartons, look at sheet_flagged_good.jpg: each one is")
+    print("either a carton that should not be in the OK folder, or a sign the crop region no longer fits.")
+    if flagged:
+        print(f"Good cartons flagged: {len(flagged)}. They are marked in the print_check column of crops_log.csv.")
     print(f"\nTime per image on this machine: median {np.median(times):.1f} ms | "
           f"95th percentile {np.percentile(times, 95):.1f} ms. Not a Jetson Nano figure.")
     print(f"Crops: {CROPS_DIR}\nLog and contact sheets: {PREPROCESSING_RESULTS_DIR}")
@@ -189,14 +223,20 @@ def write_crops(region: CropRegion, cfg: AlignConfig, manifest: dict, annotation
 def main() -> None:
     cfg = AlignConfig()
     manifest, annotations = load_manifest(), load_annotations()
-    if not annotations:
-        raise FileNotFoundError("No annotations found. Run: python -m preprocessing.annotate_aligned")
-    region = measure_region(cfg, manifest, annotations)
-    if "--measure-only" in sys.argv:
-        return
-    CROP_REGION_PATH.parent.mkdir(parents=True, exist_ok=True)
-    region.save(CROP_REGION_PATH)
-    print(f"Saved {CROP_REGION_PATH}")
+    remeasure = "--remeasure" in sys.argv or "--measure-only" in sys.argv or not CROP_REGION_PATH.exists()
+    if remeasure:
+        if not annotations:
+            raise FileNotFoundError("No annotations found. Run: python -m preprocessing.annotate_aligned")
+        region = measure_region(cfg, manifest, annotations)
+        if "--measure-only" in sys.argv:
+            return
+        CROP_REGION_PATH.parent.mkdir(parents=True, exist_ok=True)
+        region.save(CROP_REGION_PATH)
+        print(f"Saved {CROP_REGION_PATH}")
+    else:
+        region = CropRegion.load(CROP_REGION_PATH)
+        print(f"Using the saved crop region {CROP_REGION_PATH} ({region.out_w} x {region.out_h}). "
+              f"Pass --remeasure to measure it again from annotations.")
     write_crops(region, cfg, manifest, annotations)
 
 
