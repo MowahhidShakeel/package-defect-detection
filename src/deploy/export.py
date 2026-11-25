@@ -11,10 +11,13 @@ Writes deploy_bundle/<name>/ in the repository root:
 
     model.onnx              the network; input 1 x 3 x H x W, RGB, 0..255; output the defect map
     bundle.json             threshold, crop region, alignment settings
-    jetson_inspector.py     the one script the Jetson runs
+    jetson_inspector.py     the inspection engine and command line for the Jetson
+    jetson_gui.py           the demo window
 
-Copy that folder to the Jetson. See the top of jetson_inspector.py for what
-to run there.
+Copy that folder to the Jetson and run `python3 jetson_gui.py` there. The
+window also runs on this workstation, which is the quick way to try it:
+
+    python deploy_bundle/resnet34/jetson_gui.py
 
 The threshold is the same 'good' threshold the evaluation uses: just above
 the highest score of any good validation carton. The seed is chosen by
@@ -107,7 +110,8 @@ def export(encoder: str, tag: str, seed: int | None) -> Path:
                   "min_face_area_frac": cfg.min_face_area_frac, "min_align_angle_deg": cfg.min_align_angle_deg},
     }
     (out_dir / "bundle.json").write_text(json.dumps(bundle, indent=2))
-    shutil.copy(Path(__file__).with_name("jetson_inspector.py"), out_dir / "jetson_inspector.py")
+    for script in ("jetson_inspector.py", "jetson_gui.py"):
+        shutil.copy(Path(__file__).with_name(script), out_dir / script)
     size_mb = (out_dir / "model.onnx").stat().st_size / 1e6
     print(f"Bundle written to {out_dir} (model.onnx {size_mb:.1f} MB, input {region.out_w} x {region.out_h}, "
           f"threshold {threshold:.4f})")

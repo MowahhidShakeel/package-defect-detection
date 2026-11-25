@@ -45,6 +45,7 @@ from generator.defects import DefectGenerator
 from inspector.dataset import build_validation_set, good_validation_variants, load_crops
 from inspector.model import carton_score, count_parameters, load_checkpoint, to_tensor
 from inspector.train import checkpoint_path, run_name
+from viz import map_panel
 
 SYNTHETIC_TEST_DIR = DATA_DIR / "synthetic_test"
 CROPS_LOG = RESULTS_DIR / "preprocessing" / "crops_log.csv"
@@ -117,12 +118,7 @@ def pick_threshold(good: np.ndarray, bad: np.ndarray) -> float:
 
 
 def save_map(path, crop, prob, text) -> None:
-    heat = cv2.applyColorMap(prob, cv2.COLORMAP_JET)
-    overlay = cv2.addWeighted(crop, 0.55, heat, 0.45, 0)
-    out = np.hstack([crop, overlay])
-    cv2.putText(out, text, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
-    cv2.putText(out, text, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-    cv2.imwrite(str(path), out, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    cv2.imwrite(str(path), map_panel(crop, prob, text), [cv2.IMWRITE_JPEG_QUALITY, 90])
 
 
 def load_synthetic_test():

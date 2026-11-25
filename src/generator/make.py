@@ -27,6 +27,7 @@ import numpy as np
 
 from config import DATA_DIR, RESULTS_DIR, SEED
 from generator.defects import DEFECT_TYPES, DefectGenerator
+from viz import caption_bar
 
 CROPS_DIR = DATA_DIR / "crops_aligned"
 SYNTHETIC_TEST_DIR = DATA_DIR / "synthetic_test"
@@ -47,10 +48,7 @@ def _load(split: str):
 
 
 def _label(img: np.ndarray, text: str) -> np.ndarray:
-    out = img.copy()
-    cv2.putText(out, text, (6, out.shape[0] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
-    cv2.putText(out, text, (6, out.shape[0] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-    return out
+    return caption_bar(img, text, height=22)
 
 
 def _outline(img: np.ndarray, mask: np.ndarray) -> np.ndarray:

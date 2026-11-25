@@ -40,20 +40,20 @@ One production day (15 March 2023): 5,207 good cartons captured between 11:15 an
 
 Good cartons are split by the minute they were captured in: 35 minutes for training, 6 for validation and 4 for testing. The validation and test cartons therefore carry print times the model has never seen, which is what happens on the line every day. All NOT OK cartons are test-only.
 
-## Results on the first, small dataset
+## Results
 
-These figures come from the earlier dataset of 41 unique camera frames and are kept for reference until the models are retrained on the full day. ResNet-34 encoder, three training runs with different seeds, mean ± spread.
+ResNet-34 encoder, three training runs with different seeds. Test data: 655 good cartons from four capture minutes that were held out of training, and the 25 real NOT OK cartons.
 
 | Measure | Result |
 |---|---|
-| Real NOT OK cartons caught | 96.7% ± 1.9 |
-| Blank flap (71 images) | 100% in every run |
-| Wrong carton side (59 images) | 88% to 100% |
-| Print cut off at the carton edge (32 images) | 78% to 100% |
-| Good cartons rejected | 3.4% ± 3.7, all of them cartons with a print time not seen in training |
-| Synthetic defects caught | 99.6% |
+| Good cartons rejected | 0.2% (1 or 2 of 655 per run), all with print times never seen in training |
+| Real NOT OK cartons caught | 22 or 23 of 25 per run |
+| Real NOT OK cartons with a fault visible in the label region | 22 of 22 in every run |
+| Synthetic defects caught | 99.5% |
 | Defect map quality on synthetic defects (pixel AUROC) | 0.993 |
-| Time per carton on an RTX 4070 Super | about 4 ms |
+| Time per carton on an RTX 4070 Super | about 5 ms |
+
+Three of the 25 NOT OK cartons show a complete, well-formed print in the label region; whatever is wrong with them is outside the part of the carton this system looks at. Two of them are missed by every run and one by one run.
 
 Read these with the limits below in mind.
 
@@ -63,7 +63,8 @@ Read these with the limits below in mind.
 - **Only 25 real defective cartons**, and they are gross faults. Performance on fine defects (missing dots, partial characters, smudges, fading) is measured on synthetic images only.
 - **Print cut off at the carton edge is caught unreliably.** The remaining characters are well formed and the lost ones are off the carton, so the only clue is the gap where the print should start.
 - **Upside-down cartons are not corrected.** Colour cannot tell 0° from 180°.
-- **Not yet run on a Jetson Nano.** The deployment code is tested with ONNX Runtime on a PC. The TensorRT path is written but untested.
+- **Only the label region is inspected.** A fault elsewhere on the carton is not seen.
+- **Not yet run on a Jetson Nano.** The deployment code and the demo window are tested with ONNX Runtime on a PC. The TensorRT path is written but untested.
 - **Only the CNN baseline exists so far.** The comparison with a pure Vision Transformer and a hybrid CNN-ViT encoder, the subject of the thesis, is still to be done.
 
 ## Repository layout
@@ -75,8 +76,8 @@ src/
   generator/           synthetic defect generator, preview sheets, synthetic test set
   inspector/           the network, training data, training
   evaluation/          thresholds, metrics, shortcut checks, defect-map pictures
-  deploy/              export for the Jetson Nano and the script that runs there
-  legacy/              first version of the pipeline, kept for reference
+  deploy/              export for the Jetson Nano, the inspection engine and the demo window
+  viz.py               captions and defect-map overlays for the pictures
 results/               evaluation output and review sheets
 ```
 
@@ -122,7 +123,7 @@ Training time does not depend on the size of the dataset. Each epoch draws a fix
 
 Other encoders use the same commands with `--encoder`, for example `python -m inspector.train --encoder resnet18` and `python -m evaluation.evaluate --encoder resnet18`. Any `timm` model that returns multi-scale feature maps works.
 
-## Deployment on a Jetson Nano
+## Deployment and demo
 
 On the workstation:
 
@@ -130,22 +131,41 @@ On the workstation:
 python -m deploy.export
 ```
 
-This writes `deploy_bundle/resnet34/` with `model.onnx`, `bundle.json` (threshold, crop region, alignment settings) and `jetson_inspector.py`, and checks that the bundle gives the same crops, scores and verdicts as the PyTorch pipeline.
+This writes `deploy_bundle/resnet34/` with `model.onnx`, `bundle.json` (threshold, crop region, alignment settings), `jetson_inspector.py` and `jetson_gui.py`, and checks that the bundle gives the same crops, scores and verdicts as the PyTorch pipeline. The two scripts need only NumPy, OpenCV and either ONNX Runtime or TensorRT with PyCUDA. They run on Python 3.6.
 
-Copy that folder to the Jetson. The script there needs only NumPy and OpenCV, which come with JetPack, plus either TensorRT with PyCUDA or ONNX Runtime. It runs on Python 3.6.
+### The demo window
 
 ```bash
-# once, on the Jetson: build the TensorRT engine
+python deploy_bundle/resnet34/jetson_gui.py          # on the workstation, to try it
+python3 jetson_gui.py                                # on the Jetson, inside the bundle folder
+```
+
+| Mode | What it does |
+|---|---|
+| Folder of images | Inspects the images already in a folder, one after another |
+| Live | Waits for images to arrive in a folder (the camera's FTP target) and inspects each as soon as its upload has finished |
+
+For every carton the window shows the camera image with the inspected region outlined, the label crop, the defect map, the verdict with its confidence, the defect score and the time each stage took. Clicking a row in the list shows that carton again.
+
+The results folder receives `log.csv` (one row per carton) and, for every NOT OK carton, the camera image (`not_ok/`) and a captioned picture with the defect map (`maps/`). In live mode inspected images are moved out of the watched folder into `ok/` or `not_ok/`.
+
+**Confidence** is how far the score is from the threshold: 50% at the threshold, 100% at a score of 0 (OK) or 1 (NOT OK). It is a margin, not a calibrated probability.
+
+### On the Jetson Nano
+
+Copy the bundle folder to the Jetson, then:
+
+```bash
+sudo apt-get install python3-tk                      # for the window
+# once: build the TensorRT engine (takes several minutes)
 /usr/src/tensorrt/bin/trtexec --onnx=model.onnx --saveEngine=model.engine --fp16
 
 python3 jetson_inspector.py --bundle . --benchmark carton.bmp      # time each stage
-python3 jetson_inspector.py --bundle . --watch /srv/ftp/incoming --out ~/inspection --save-maps
+python3 jetson_gui.py --watch /path/to/ftp/folder                  # the window, live mode filled in
 ```
 
-In `--watch` mode every image the camera uploads to the folder is inspected, logged to `log.csv` and moved to `ok/` or `not_ok/`.
+The same inspection without a screen: `python3 jetson_inspector.py --bundle . --watch FOLDER --out DIR` or `--folder FOLDER`.
 
 ## Evaluation outputs
 
 `results/evaluation/<model>/` holds, for each seed, a table of every test image with its score and verdict, and a picture of each mistake next to its defect map. `summary.csv` has one row per seed plus the mean and spread.
-
-`results/evaluation/resnet34_noredraw/` is the earlier model trained without redrawn good cartons, kept as a record of the shortcut it learned.

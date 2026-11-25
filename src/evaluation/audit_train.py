@@ -31,6 +31,7 @@ from evaluation.evaluate import frame_of, run
 from inspector.dataset import crop_paths
 from inspector.model import load_checkpoint
 from inspector.train import checkpoint_path, run_name
+from viz import map_panel
 
 TOP = 48
 
@@ -62,11 +63,7 @@ def main() -> None:
     _, maps = run(model, top, DEVICE)
     tiles = []
     for rank, (crop, prob, i) in enumerate(zip(top, maps, order[:TOP]), 1):
-        overlay = cv2.addWeighted(crop, 0.55, cv2.applyColorMap(prob, cv2.COLORMAP_JET), 0.45, 0)
-        tile = np.hstack([crop, overlay])
-        text = f"#{rank}  score {scores[i]:.3f}  {frame_of(paths[i].name)}"
-        cv2.putText(tile, text, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(tile, text, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        tile = map_panel(crop, prob, f"#{rank}  score {scores[i]:.3f}  {frame_of(paths[i].name)}")
         tiles.append(tile)
     while len(tiles) % 2:
         tiles.append(np.full_like(tiles[0], 255))
